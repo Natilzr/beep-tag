@@ -251,7 +251,7 @@
                     <item>seq</item>
                     <item>config0</item>
                     <item>m_pwm0</item>
-                    <item></item>
+                    <item />
                 </expressions>
                 <col-names>
                     <item>Expression</item>

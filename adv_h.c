@@ -350,7 +350,7 @@ void    GetName(uint8_t * pnew_name)
   char addr_str[12];
   uint8_t max_len = 13;
 //  uint32_t id0 = NRF_FICR->DEVICEID[0];
-//uint32_t id1 = NRF_FICR->DEVICEID[1];
+// uint32_t id1 = NRF_FICR->DEVICEID[1];
 
 uint32_t id0 = NRF_FICR->DEVICEADDR[0];
 uint32_t id1 = NRF_FICR->DEVICEADDR[1];
