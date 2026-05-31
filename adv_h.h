@@ -9,7 +9,8 @@
 #include "app_timer.h"
 
 #define APP_BEACON_INFO_LENGTH1    0x1B         //27
-#define APP_ADV_INTERVAL                3200   //every 2 sec
+//#define APP_ADV_INTERVAL                3200   //every 2 sec
+#define APP_ADV_INTERVAL                4800   //every 2 sec
 //#define APP_ADV_INTERVAL_LONG           16000   //every 10 sec
 #define APP_ADV_INTERVAL_LONG           9600   //every 6 sec
 //#define APP_ADV_INTERVAL                64                                      /**< The advertising interval (in units of 0.625 ms; this value corresponds to 40 ms). */
@@ -45,7 +46,7 @@ extern uint32_t MemReadAdr;
 extern ble_gap_adv_data_t m_adv_data;
 extern uint8_t m_adv_handle;
 
-
+extern void start_inactiv_T(void);
 
 
 #endif

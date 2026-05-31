@@ -37,7 +37,7 @@
 #include "nrf_delay.h" // For nrf_delay_ms()
 #include "adv_h.h"
 #include "adc.h"
-
+#include "nrf_nvmc.h"
 #include "nrf_drv_pwm.h"
 //#include "nrfx_pwm.h"
 #include "app_util_platform.h"
@@ -97,7 +97,13 @@
 
 
 
+#define STATUS_FLASH_ADDR   0x26000
+#define STATUS_MAGIC        0xDEADBEEF
 
+#define RESET_REASON_NORMAL     0x00
+#define RESET_REASON_BATTERY    0x01
+#define RESET_REASON_WDT        0x02
+#define RESET_REASON_BLE_CMD    0x03
               
                                           
 
@@ -136,7 +142,7 @@ APP_TIMER_DEF(m_adv_update_timer);
 
 APP_TIMER_DEF(ADC_Update_timer);
 
-
+APP_TIMER_DEF(m_inactivity_timer);
 
 APP_TIMER_DEF(Reset_timer);     
 
@@ -198,7 +204,8 @@ static uint16_t m_conn_handle = BLE_CONN_HANDLE_INVALID;                        
 uint8_t m_adv_handle = BLE_GAP_ADV_SET_HANDLE_NOT_SET;                   /**< Advertising handle used to identify an advertising set. */
 static uint8_t m_enc_advdata[BLE_GAP_ADV_SET_DATA_SIZE_MAX];                    /**< Buffer for storing an encoded advertising set. */
 static uint8_t m_enc_scan_response_data[BLE_GAP_ADV_SET_DATA_SIZE_MAX];         /**< Buffer for storing an encoded scan data. */
-
+static volatile bool button_event = false;
+void force_sleep(void);
 
 uint8_t flash_ready = true;
 uint8_t StorageState;
@@ -218,9 +225,21 @@ uint8_t flash_empty;
 uint8_t SRon;
 uint8_t sound_cnt = 0;
 uint8_t sound_task = 0;
+uint8_t sleep_task = 0;
 uint8_t sound_cnt2 = 0;
 //static bool button_hold_confirmed = false;
 
+
+
+typedef struct
+{
+    uint32_t magic;
+    bool     stay_awake;
+    uint8_t  reset_reason;
+} device_status_t;
+
+
+   device_status_t status;
 
 /**@brief Struct that contains pointers to the encoded advertising data. */
 ble_gap_adv_data_t m_adv_data =
@@ -513,6 +532,15 @@ void piezo_stop(void)
     nrf_gpio_pin_clear(PIEZO_PIN2);
 }
 
+static void inactivity_timeout_handler(void * p_context)
+{
+    if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
+    {
+        sd_ble_gap_disconnect(m_conn_handle,
+                              BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+    }
+}
+
 void play_note(uint16_t freq, uint16_t times)
 {
   uint16_t pres;
@@ -551,7 +579,10 @@ APP_ERROR_CHECK(err_code);
 //                            sound_timer_handler);
 //APP_ERROR_CHECK(err_code);
 
-
+err_code =  app_timer_create(&m_inactivity_timer,
+                 APP_TIMER_MODE_SINGLE_SHOT,
+                 inactivity_timeout_handler);
+APP_ERROR_CHECK(err_code);
 /*
     // Create the timer
 err_code = app_timer_create(&DISS_Update_timer,
@@ -660,6 +691,9 @@ static void led_write_handler(uint16_t conn_handle, ble_lbs_t * p_lbs, uint8_t l
   //      NRF_LOG_INFO("Received LED OFF!");
     }
 }
+
+
+
 
 static void ppk1_write_handler(uint16_t conn_handle, ble_lbs_t * p_lbs, uint8_t const * data, uint16_t len)
 {
@@ -773,6 +807,18 @@ static void version_read_handler(uint16_t conn_handle, ble_lbs_t * p_lbs, uint8_
     
 }
 
+
+int is_equal(const uint8_t *a, const char *b) {
+    while (*a && *b) {
+        if (*a != *b) {
+            return 0; // not equal
+        }
+        a++;
+        b++;
+    }
+    return (*a == *b); // both must end at same time
+}
+
 static void buzz_write_handler(uint16_t conn_handle, ble_lbs_t * p_lbs, uint8_t const * data, uint16_t len)
 {
 //demo1();
@@ -781,7 +827,18 @@ static void buzz_write_handler(uint16_t conn_handle, ble_lbs_t * p_lbs, uint8_t 
 //  err_code = app_timer_start(m_sound_update_timer, UPDATE_INTERVAL_TICKS_SOUND, NULL);
 
 //APP_ERROR_CHECK(err_code);
-    sound_task = 1;
+  if(len == 0x04)
+  {
+    if (is_equal(data, "AZ12"))
+    {
+      sound_task = 1;
+    }
+    else if(is_equal(data, "SLEP"))
+    {
+      sleep_task = 1;
+    }
+  }
+          
 }
 
 
@@ -932,6 +989,10 @@ static void ble_evt_handler(ble_evt_t const * p_ble_evt, void * p_context)
             APP_ERROR_CHECK(err_code);
             err_code = app_button_enable();
             APP_ERROR_CHECK(err_code);
+            err_code =  app_timer_start(m_inactivity_timer,
+                    APP_TIMER_TICKS(2000), // 3 sec
+                    NULL);
+            APP_ERROR_CHECK(err_code);
             break;
 
         case BLE_GAP_EVT_DISCONNECTED:
@@ -1041,9 +1102,10 @@ static void button_event_handler(uint8_t pin_no, uint8_t button_action)
 
     switch (pin_no)
     {
+       /*
         case LEDBUTTON_BUTTON:
             NRF_LOG_INFO("push");
- /*
+
             err_code = ble_lbs_on_button_change(m_conn_handle, &m_lbs, button_action);
             if (err_code != NRF_SUCCESS &&
                 err_code != BLE_ERROR_INVALID_CONN_HANDLE &&
@@ -1057,12 +1119,15 @@ static void button_event_handler(uint8_t pin_no, uint8_t button_action)
         default:
             APP_ERROR_HANDLER(pin_no);
             break;
-*/
+
         if (nrf_gpio_pin_read(WAKEUP_BUTTON_PIN) == 0) {
         app_timer_start(m_button_timer_id, APP_TIMER_TICKS(HOLD_TIME_MS), NULL);
     } else {
         app_timer_stop(m_button_timer_id);
     }
+*/
+            button_event = true;    // Just set flag, handle in main loop
+
     }
     
     
@@ -1070,7 +1135,38 @@ static void button_event_handler(uint8_t pin_no, uint8_t button_action)
     
     
 }
+#endif
 
+void button_gpiote_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
+{
+    button_event = true;    // Just set flag, handle in main loop
+}
+
+void button_interrupt_init(void)
+{
+    if (!nrf_drv_gpiote_is_init())
+    {
+        nrf_drv_gpiote_init();
+    }
+
+    nrf_drv_gpiote_in_config_t config = GPIOTE_CONFIG_IN_SENSE_HITOLO(true);
+    //                                                         ^
+    //                                          true = use SENSE (works during sleep)
+    //                                          HITOLO = triggers on falling edge (button press)
+
+    config.pull = NRF_GPIO_PIN_PULLUP;      // Pull up, button connects to GND
+
+    nrf_drv_gpiote_in_init(BUTTON_PIN, &config, button_gpiote_handler);
+    nrf_drv_gpiote_in_event_enable(BUTTON_PIN, true);
+}
+
+// ============================================================
+// is_button_pressed — now reads pin directly
+// ============================================================
+
+
+
+#if 0
 void button_hold_timer_handler(void *p_context) {
     if (nrf_gpio_pin_read(WAKEUP_BUTTON_PIN) == 0) {
         button_hold_confirmed = true;
@@ -1117,20 +1213,20 @@ void wait_for_button_hold(void) {
     NRF_LOG_INFO("Button held long enough. Starting app...");
 }
 
-
+#if 0
 /* GPIOTE event is used only to start periodic timer when first button is activated. */
 static void gpiote_event_handler(nrf_drv_gpiote_pin_t pin, nrf_gpiote_polarity_t action)
 {
 
 }
-
+#endif
 
 /**@brief Function for initializing the button handler module.
  */
 
 static void buttons_init(void)
 {
-  
+  #if 0
   ret_code_t err_code;
 
       if (!nrf_drv_gpiote_is_init())
@@ -1144,7 +1240,8 @@ config.pull = NRF_GPIO_PIN_PULLUP;
  err_code = nrf_drv_gpiote_in_init(BUTTON_PIN, &config, gpiote_event_handler);
 APP_ERROR_CHECK(err_code);
 nrf_drv_gpiote_in_event_enable(BUTTON_PIN, true);
-    
+#endif
+    button_interrupt_init();        // <-- MUST be before any sleep call
 }
 
 
@@ -1229,47 +1326,198 @@ void wait_ms(uint32_t ms) {
     nrf_delay_ms(ms);  // Not power-efficient, but fine for short waits
 }
 
+
+
+void start_inactiv_T(void)
+{
+                            app_timer_stop(m_inactivity_timer);
+                app_timer_start(m_inactivity_timer,
+                    //APP_TIMER_TICKS(2000),
+                    APP_TIMER_TICKS(6000),
+                    NULL);
+}
+
+
+
+static bool stay_awake = false;
+
+void nvm_write_status(device_status_t *status)
+{
+    status->magic = STATUS_MAGIC;
+    nrf_nvmc_page_erase(STATUS_FLASH_ADDR);
+    nrf_nvmc_write_bytes(STATUS_FLASH_ADDR, (uint8_t*)status, sizeof(device_status_t));
+}
+
+bool nvm_read_status(device_status_t *status)
+{
+    memcpy(status, (void*)STATUS_FLASH_ADDR, sizeof(device_status_t));
+    return (status->magic == STATUS_MAGIC);
+}
+
+
+
+void ble_disconnect(void)
+{
+  ret_code_t err_code;
+    if (m_conn_handle != BLE_CONN_HANDLE_INVALID)
+    {
+        err_code = sd_ble_gap_disconnect(m_conn_handle,
+                              BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
+        if(err_code)
+        {
+          APP_ERROR_CHECK(err_code);
+        }
+    }  
+    
+}
+
+  
+
+
+// === Force sleep - bypasses stay_awake completely ===
+void force_sleep(void)
+{
+    ret_code_t err_code;
+    stay_awake = false;
+    status.stay_awake =  stay_awake;
+    err_code = sd_ble_gap_adv_stop(m_adv_handle);
+    nvm_write_status(&status);
+    if (err_code != NRF_SUCCESS &&
+    err_code != NRF_ERROR_INVALID_STATE)
+    {
+        APP_ERROR_CHECK(err_code);
+    }
+
+    // Cleanup before sleep
+          // Drop BLE connection gracefully
+ //   peripherals_shutdown();     // Turn off sensors, LEDs, etc.
+
+    // Feed WDT one last time if still running, or disable it
+//    nrf_drv_wdt_feed();        // or disable WDT if your HW allows
+    NVIC_SystemReset();
+   // sd_app_evt_wait();          // Sleep
+}
+
+
+void enter_sleep_mode(void)
+{
+  
+  ret_code_t err_code;
+
+    // Disable peripherals
+    NRF_UART0->ENABLE = 0;
+    NRF_TWI0->ENABLE  = 0;
+    NRF_SPI0->ENABLE  = 0;
+    NRF_SAADC->ENABLE = 0;
+    NRF_RADIO->POWER = 0;
+
+    // Disconnect unused GPIOs
+    for (int i = 0; i < 32; i++)
+    {
+        if (i != BUTTON_PIN)
+        {
+            nrf_gpio_cfg_default(i);
+        }
+    }
+
+    nrf_gpio_cfg_sense_input(
+        BUTTON_PIN,
+        NRF_GPIO_PIN_PULLUP,
+        NRF_GPIO_PIN_SENSE_LOW
+    );
+
+    // Clear pending interrupts
+    // Go directly to System OFF — no WFE
+    // Enable SD minimally just to call sd_power_system_off()
+    nrf_clock_lf_cfg_t clock_lf_cfg =
+    {
+
+        .source       = NRF_SDH_CLOCK_LF_SRC,
+        .rc_ctiv      = NRF_SDH_CLOCK_LF_RC_CTIV,
+        .rc_temp_ctiv = NRF_SDH_CLOCK_LF_RC_TEMP_CTIV,
+        .accuracy     = NRF_SDH_CLOCK_LF_ACCURACY
+    };
+// If SD already running disable it first
+    if (nrf_sdh_is_enabled())
+    {
+        sd_softdevice_disable();
+        while (nrf_sdh_is_enabled()) {}
+    }
+    err_code = sd_softdevice_enable(&clock_lf_cfg, app_error_fault_handler);
+    APP_ERROR_CHECK(err_code);
+
+    
+    
+    // Clear GPIOTE events
+    NRF_GPIOTE->EVENTS_PORT = 0;
+    (void)NRF_GPIOTE->EVENTS_PORT;
+    // Now enter system off cleanly via SD
+    err_code = sd_power_system_off();
+
+      APP_ERROR_CHECK(err_code);
+
+    
+        // Never reaches here
+  //  while (1) { }
+}
+
+
+
+// Put this BEFORE main() using a constructor
+static uint32_t m_reset_reason __attribute__((section(".noinit")));
+
+void read_reset_reason(void) __attribute__((constructor));
+void read_reset_reason(void)
+{
+    m_reset_reason = NRF_POWER->RESETREAS;
+    NRF_POWER->RESETREAS = 0xFFFFFFFF;
+}
+
 /**@brief Function for application main entry.
  */
 int main(void)
 {
     // Initialize.
-  SRon = 1;
-  flash_empty = 0;
- //   log_init();
+    SRon = 1;
+    // Read reset reason BEFORE anything can clear it
+    // First thing — blink LED to confirm main() is running
+    nrf_gpio_cfg_output(LED_1);
+    
+    // Read NVM first — no SD needed
+    nvm_read_status(&status);
+    stay_awake = status.stay_awake;
+    // If device should stay asleep
+    if (!stay_awake)
+    {
+        for (int b = 0; b < 2; b++)
+        {
+           nrf_gpio_pin_set(LED_1);
+           for (volatile uint32_t i = 0; i < 500000; i++) { __NOP(); }
+           nrf_gpio_pin_clear(LED_1);
+           for (volatile uint32_t i = 0; i < 500000; i++) { __NOP(); }
+        }
+        // Still pressed?
+        if (is_button_pressed())
+        {
+          // Enable wake mode
+          status.stay_awake = true;
+          nvm_write_status(&status);
+          stay_awake= true;
+        }
+        else
+        {
+          //enter_system_off();
+          enter_sleep_mode();
+        }
+    }
+// only initialize expensive things AFTER wake
+    flash_empty = 0;
     leds_init();
-//    buzzer_init();
     timers_init();
+    ble_stack_init();
     buttons_init();
     power_management_init();
 
-
-       // Simulate FDS logic — assume this is first boot
-      // Simulate FDS logic — assume this is first boot
- 
-    ble_stack_init();
-#if 0
-    sd_app_evt_wait();  // System ON sleep mode, SoftDevice-safe
-
-     while (true) 
-     {
-       if (is_button_pressed()) 
-       {
-        wait_ms(2000);
-        if (is_button_pressed()) 
-        {
-            // Long press confirmed
-            break;
-            // Do your action
-        } else 
-        {
-    // Optional: clear any flags
-    nrf_pwr_mgmt_run();
-    sd_app_evt_wait();  // Go back to System ON sleep
-        }
-      }
-    }
-#endif
     piezo_init();
 
 
@@ -1315,6 +1563,13 @@ play_note(5000,50);
     // Enter main loop.
     for (;;)
     {
+      if(sleep_task)
+      {
+        sleep_task = 0;
+         nrf_delay_ms(100);
+         ble_disconnect(); 
+        force_sleep();
+      }
       if(sound_task)
       {
         switch(sound_cnt)
@@ -1385,4 +1640,44 @@ play_note(5000,50);
 }
 
 
+//was after start 
+#if 0
+    if (nvm_read_status(&status))
+    {
+        // Valid NVM record found
+        if (status.reset_reason == RESET_REASON_BATTERY ||
+            status.reset_reason == RESET_REASON_WDT)
+        {
+            // Forced reset — always start sleeping
+            stay_awake = false;
+        }
+        else
+        {
+            // Restore last known state
+            stay_awake = status.stay_awake;
+        }
+    }
+    else
+    {
+        // First boot — no NVM record, start sleeping
+        stay_awake = false;
+    }
+        // --- Sleep on startup if needed ---
+    if (!stay_awake)
+    {
+        sd_app_evt_wait();
+    }
+    if (button_event)           // <-- check event flag, not raw pin
+    {
+      button_event = false;
+      wait_ms(2000);
+      if (is_button_pressed())
+      {
+                    stay_awake          = true;
+                    status.stay_awake   = true;
+                    status.reset_reason = RESET_REASON_NORMAL;
+                    nvm_write_status(&status);
+      }
+    }
+#endif
 
