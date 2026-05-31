@@ -77,7 +77,7 @@ void adv_update_timer_handler(void *p_context)
     idx = (uint8_t)((MemReadAdr - base) / 32);
     // Example: Update name and manufacturer data dynamically
     if (NumRec == 0) 
-    { //on the off-chance NumRec hasn’t been initialized or set properly
+    { //on the off-chance NumRec hasnï¿½t been initialized or set properly
         MemReadAdr = base;
     }
     else if (idx >= (NumRec - 1)) 
@@ -347,8 +347,8 @@ void GetDataUUID(uint8_t *new_manuf_data)
 void    GetName(uint8_t * pnew_name)
 {
      ret_code_t     err_code;
-  char addr_str[12];
-  uint8_t max_len = 13;
+  char addr_str[13];
+  uint8_t max_len = sizeof(addr_str);
 //  uint32_t id0 = NRF_FICR->DEVICEID[0];
 // uint32_t id1 = NRF_FICR->DEVICEID[1];
 
